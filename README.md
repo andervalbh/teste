@@ -5,9 +5,13 @@ Script que extrai o extrato de pontos do **Azul Fidelidade** e salva em CSV e Ex
 ## Instalação (uma vez)
 
 ```bash
-pip install -r requirements.txt
-playwright install chromium
+python -m pip install -r requirements.txt
+python -m playwright install chromium
 ```
+
+> **Windows:** use `python -m playwright ...` (e não só `playwright ...`). O comando solto
+> só funciona se a pasta `Scripts` do Python estiver no PATH. Se `python` não for reconhecido,
+> troque por `py` (ex.: `py -m playwright install chromium`).
 
 ## Uso
 
