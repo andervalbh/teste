@@ -40,6 +40,32 @@ Com a sessão salva dá até para rodar sem janela:
 python azul_extrato.py --headless --auto 20 --url "<URL da página de extrato>"
 ```
 
+## Se aparecer "Identificamos um comportamento incomum vindo do seu IP"
+
+É a proteção anti-robô do site da Azul: ela percebeu que o navegador estava sendo controlado
+por um script. O bloqueio é temporário. Feche a janela do script, espere alguns minutos e confira
+se o site abre normalmente no seu navegador de sempre. Desligue a VPN se usar uma.
+
+Depois disso, use o **modo arquivo**. Ele não controla o navegador; você navega normalmente e o
+script só lê o que você salvou:
+
+1. No Edge ou no Chrome normal, faça login no Azul Fidelidade.
+2. Aperte **F12**, abra a aba **Rede** (Network) e, com ela aberta, entre na página **Extrato**
+   (ou recarregue com F5). Escolha o período e carregue tudo ("ver mais").
+3. Na aba Rede, clique no ícone de **seta para baixo** ("Exportar HAR") e salve, por exemplo,
+   como `extrato.har` na pasta do projeto.
+4. Rode:
+
+   ```bash
+   python azul_extrato.py --arquivo extrato.har
+   ```
+
+Alternativa sem F12: na página do extrato, **Ctrl+S** → "Página da Web, completa", e rode
+`python azul_extrato.py --arquivo "Extrato.html"`.
+
+> O arquivo HAR pode conter dados da sua sessão. Apague-o depois de gerar a planilha e não o envie
+> a ninguém. Se precisar me mostrar algo, mande só o `saida/bruto/respostas_*.json` sem CPF/nome.
+
 ## Como funciona
 
 O script não usa sua senha. Você faz o login no navegador e o script só escuta as respostas JSON

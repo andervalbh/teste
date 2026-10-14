@@ -1,3 +1,4 @@
 .perfil-azul/
 saida/
 __pycache__/
+*.har

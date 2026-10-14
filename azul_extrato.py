@@ -16,17 +16,22 @@ Fluxo:
 Uso:
   python -m pip install -r requirements.txt
   python azul_extrato.py
+
+Se o site bloquear o navegador automatizado ("comportamento incomum vindo do
+seu IP"), use o modo arquivo: abra o extrato no seu navegador normal, exporte
+um HAR pelas ferramentas de desenvolvedor (F12 > Rede) ou salve a página, e rode
+  python azul_extrato.py --arquivo extrato.har
 """
 
 import argparse
+import base64
 import csv
 import json
 import re
 import sys
 from datetime import datetime
+from html.parser import HTMLParser
 from pathlib import Path
-
-from playwright.sync_api import sync_playwright
 
 URL_PADRAO = "https://www.voeazul.com.br/br/pt/azul-fidelidade"
 
@@ -121,52 +126,98 @@ def ler_tabelas_da_pagina(page):
     return linhas
 
 
-def salvar(linhas, destino: Path, nome: str):
-    colunas = []
-    for linha in linhas:
-        for k in linha:
-            if k not in colunas:
-                colunas.append(k)
-
-    csv_path = destino / f"{nome}.csv"
-    # utf-8-sig + ';' para abrir direto no Excel em português.
-    with csv_path.open("w", newline="", encoding="utf-8-sig") as f:
-        w = csv.DictWriter(f, fieldnames=colunas, delimiter=";", extrasaction="ignore")
-        w.writeheader()
-        w.writerows(linhas)
-    print(f"  CSV:   {csv_path}")
-
-    try:
-        from openpyxl import Workbook
-    except ImportError:
-        print("  (openpyxl não instalado; pulando .xlsx)")
-        return
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Extrato"
-    ws.append(colunas)
-    for linha in linhas:
-        ws.append([linha.get(c) if not isinstance(linha.get(c), (dict, list)) else json.dumps(linha.get(c), ensure_ascii=False) for c in colunas])
-    xlsx_path = destino / f"{nome}.xlsx"
-    wb.save(xlsx_path)
-    print(f"  Excel: {xlsx_path}")
+def ler_har(caminho):
+    """Lê as respostas JSON de um arquivo HAR exportado pelo navegador (F12 > Rede)."""
+    har = json.loads(Path(caminho).read_text(encoding="utf-8-sig"))
+    capturas = []
+    for entrada in har.get("log", {}).get("entries", []):
+        conteudo = entrada.get("response", {}).get("content", {})
+        texto = conteudo.get("text")
+        if not texto:
+            continue
+        if conteudo.get("encoding") == "base64":
+            try:
+                texto = base64.b64decode(texto).decode("utf-8")
+            except Exception:
+                continue
+        try:
+            corpo = json.loads(texto)
+        except ValueError:
+            continue
+        url = entrada.get("request", {}).get("url", "")
+        if any(True for _ in listas_de_movimentacoes(corpo)) or PALAVRAS_URL.search(url):
+            capturas.append((url, corpo))
+    return capturas
 
 
-def main():
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--url", default=URL_PADRAO, help="página inicial (padrão: Azul Fidelidade)")
-    ap.add_argument("--saida", default="saida", help="pasta de saída (padrão: ./saida)")
-    ap.add_argument("--perfil", default=".perfil-azul", help="pasta do perfil do navegador (guarda o login)")
-    ap.add_argument("--headless", action="store_true", help="sem janela (só funciona se o login já estiver salvo no perfil)")
-    ap.add_argument("--auto", type=float, metavar="SEG",
-                    help="em vez de esperar ENTER, extrai após SEG segundos (útil com --headless)")
-    ap.add_argument("--navegador", choices=["auto", "chrome", "msedge", "chromium"], default="auto",
-                    help="auto (padrão) tenta Chrome, depois Edge, depois o Chromium do Playwright")
-    ap.add_argument("--chrome", metavar="CAMINHO", help="usar outro executável do Chrome/Chromium")
-    args = ap.parse_args()
+class _LeitorHTML(HTMLParser):
+    """Extrai as linhas de tabelas e o texto, linha a linha, de uma página salva."""
 
-    destino = Path(args.saida)
-    (destino / "bruto").mkdir(parents=True, exist_ok=True)
+    BLOCOS = {"p", "div", "li", "tr", "br", "h1", "h2", "h3", "h4", "section", "article"}
+
+    def __init__(self):
+        super().__init__()
+        self.tabelas, self.texto = [], []
+        self._ignorar = 0
+        self._linha = self._celula = None
+
+    def handle_starttag(self, tag, attrs):
+        if tag in ("script", "style", "noscript"):
+            self._ignorar += 1
+        elif tag == "table":
+            self.tabelas.append([])
+        elif tag == "tr" and self.tabelas:
+            self._linha = []
+        elif tag in ("td", "th") and self._linha is not None:
+            self._celula = []
+        if tag in self.BLOCOS:
+            self.texto.append("\n")
+
+    def handle_endtag(self, tag):
+        if tag in ("script", "style", "noscript"):
+            self._ignorar = max(0, self._ignorar - 1)
+        elif tag in ("td", "th") and self._celula is not None:
+            self._linha.append((tag, " ".join("".join(self._celula).split())))
+            self._celula = None
+        elif tag == "tr" and self._linha is not None:
+            self.tabelas[-1].append(self._linha)
+            self._linha = None
+        if tag in self.BLOCOS:
+            self.texto.append("\n")
+
+    def handle_data(self, data):
+        if self._ignorar:
+            return
+        if self._celula is not None:
+            self._celula.append(data)
+        self.texto.append(data)
+
+
+def ler_html(caminho):
+    """Plano B para página salva (Ctrl+S): tabelas ou linhas com data dd/mm/aaaa."""
+    leitor = _LeitorHTML()
+    leitor.feed(Path(caminho).read_text(encoding="utf-8", errors="replace"))
+    linhas = []
+    for tabela in leitor.tabelas:
+        cab = [t for tag, t in tabela[0]] if tabela and all(tag == "th" for tag, _ in tabela[0]) else []
+        for tr in tabela:
+            cels = [t for tag, t in tr if tag == "td"]
+            if cels:
+                linhas.append({(cab[i] if i < len(cab) and cab[i] else f"coluna_{i + 1}"): c for i, c in enumerate(cels)})
+    if linhas:
+        return linhas
+    data = re.compile(r"\b\d{2}/\d{2}/\d{2,4}\b")
+    for t in "".join(leitor.texto).split("\n"):
+        t = " ".join(t.split())
+        if len(data.findall(t)) == 1 and re.search(r"\d", data.sub("", t)):
+            linhas.append({"linha": t})
+    return linhas
+
+
+def capturar_no_navegador(args):
+    """Abre o navegador, espera o usuário chegar ao extrato e devolve (capturas, linhas_html)."""
+    from playwright.sync_api import sync_playwright
+
     capturas = []  # (url, json)
 
     def ao_responder(resp):
@@ -217,6 +268,8 @@ def main():
                 "2) Vá em 'Extrato' e escolha o período (role a página / clique em 'ver mais'\n"
                 "   até aparecerem todas as movimentações que você quer).\n"
                 "3) Volte aqui e pressione ENTER para extrair.\n"
+                "   Se aparecer 'comportamento incomum vindo do seu IP', feche tudo e use o\n"
+                "   modo --arquivo (veja o README).\n"
             )
             input()
 
@@ -224,6 +277,69 @@ def main():
         page = ctx.pages[-1]
         linhas_html = ler_tabelas_da_pagina(page)
         ctx.close()
+    return capturas, linhas_html
+
+
+def salvar(linhas, destino: Path, nome: str):
+    colunas = []
+    for linha in linhas:
+        for k in linha:
+            if k not in colunas:
+                colunas.append(k)
+
+    csv_path = destino / f"{nome}.csv"
+    # utf-8-sig + ';' para abrir direto no Excel em português.
+    with csv_path.open("w", newline="", encoding="utf-8-sig") as f:
+        w = csv.DictWriter(f, fieldnames=colunas, delimiter=";", extrasaction="ignore")
+        w.writeheader()
+        w.writerows(linhas)
+    print(f"  CSV:   {csv_path}")
+
+    try:
+        from openpyxl import Workbook
+    except ImportError:
+        print("  (openpyxl não instalado; pulando .xlsx)")
+        return
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Extrato"
+    ws.append(colunas)
+    for linha in linhas:
+        ws.append([linha.get(c) if not isinstance(linha.get(c), (dict, list)) else json.dumps(linha.get(c), ensure_ascii=False) for c in colunas])
+    xlsx_path = destino / f"{nome}.xlsx"
+    wb.save(xlsx_path)
+    print(f"  Excel: {xlsx_path}")
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--url", default=URL_PADRAO, help="página inicial (padrão: Azul Fidelidade)")
+    ap.add_argument("--saida", default="saida", help="pasta de saída (padrão: ./saida)")
+    ap.add_argument("--perfil", default=".perfil-azul", help="pasta do perfil do navegador (guarda o login)")
+    ap.add_argument("--headless", action="store_true", help="sem janela (só funciona se o login já estiver salvo no perfil)")
+    ap.add_argument("--auto", type=float, metavar="SEG",
+                    help="em vez de esperar ENTER, extrai após SEG segundos (útil com --headless)")
+    ap.add_argument("--navegador", choices=["auto", "chrome", "msedge", "chromium"], default="auto",
+                    help="auto (padrão) tenta Chrome, depois Edge, depois o Chromium do Playwright")
+    ap.add_argument("--chrome", metavar="CAMINHO", help="usar outro executável do Chrome/Chromium")
+    ap.add_argument("--arquivo", nargs="+", metavar="ARQ",
+                    help="não abre navegador: lê arquivo(s) .har, .json ou .html salvos do seu navegador")
+    args = ap.parse_args()
+
+    destino = Path(args.saida)
+    (destino / "bruto").mkdir(parents=True, exist_ok=True)
+    if args.arquivo:
+        capturas, linhas_html = [], []
+        for arq in args.arquivo:
+            if arq.lower().endswith(".har"):
+                capturas += ler_har(arq)
+            elif arq.lower().endswith(".json"):
+                corpo = json.loads(Path(arq).read_text(encoding="utf-8-sig"))
+                capturas.append((arq, corpo))
+            else:
+                linhas_html += ler_html(arq)
+    else:
+        capturas, linhas_html = capturar_no_navegador(args)
 
     carimbo = datetime.now().strftime("%Y%m%d_%H%M%S")
 
@@ -249,7 +365,8 @@ def main():
         linhas = linhas_html
     else:
         print(
-            "Não encontrei movimentações. Confira se a página de extrato estava aberta ao pressionar ENTER.\n"
+            "Não encontrei movimentações. Confira se a página de extrato estava aberta\n"
+            "(ao pressionar ENTER, ou ao exportar o HAR / salvar a página).\n"
             f"As respostas capturadas estão em {bruto} — me envie (sem dados sensíveis) para ajustar o script."
         )
         sys.exit(1)
