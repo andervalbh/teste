@@ -2,7 +2,8 @@
 """Extrai o extrato de pontos do Azul Fidelidade e salva em CSV/Excel.
 
 Fluxo:
-  1. Abre um navegador Chromium visível (perfil persistente em ./.perfil-azul,
+  1. Abre o Google Chrome ou o Microsoft Edge já instalados no computador
+     (ou o Chromium do Playwright, se nenhum dos dois existir), visível (perfil persistente em ./.perfil-azul,
      então o login fica salvo entre execuções).
   2. Você faz login manualmente (captcha / código por SMS / e-mail) e abre a
      página de extrato, ajustando o período desejado.
@@ -13,8 +14,7 @@ Fluxo:
      em ./saida/extrato_<data>.csv e .xlsx, além do JSON bruto para conferência.
 
 Uso:
-  pip install -r requirements.txt
-  playwright install chromium
+  python -m pip install -r requirements.txt
   python azul_extrato.py
 """
 
@@ -160,6 +160,8 @@ def main():
     ap.add_argument("--headless", action="store_true", help="sem janela (só funciona se o login já estiver salvo no perfil)")
     ap.add_argument("--auto", type=float, metavar="SEG",
                     help="em vez de esperar ENTER, extrai após SEG segundos (útil com --headless)")
+    ap.add_argument("--navegador", choices=["auto", "chrome", "msedge", "chromium"], default="auto",
+                    help="auto (padrão) tenta Chrome, depois Edge, depois o Chromium do Playwright")
     ap.add_argument("--chrome", metavar="CAMINHO", help="usar outro executável do Chrome/Chromium")
     args = ap.parse_args()
 
@@ -181,10 +183,28 @@ def main():
                 print(f"  [capturado] {resp.url[:120]}")
 
     with sync_playwright() as p:
-        ctx = p.chromium.launch_persistent_context(
-            args.perfil, headless=args.headless, locale="pt-BR", viewport={"width": 1280, "height": 900},
-            executable_path=args.chrome,
-        )
+        opcoes = dict(headless=args.headless, locale="pt-BR", viewport={"width": 1280, "height": 900})
+        if args.chrome:
+            tentativas = [dict(executable_path=args.chrome)]
+        elif args.navegador == "auto":
+            tentativas = [dict(channel="chrome"), dict(channel="msedge"), {}]
+        elif args.navegador == "chromium":
+            tentativas = [{}]
+        else:
+            tentativas = [dict(channel=args.navegador)]
+        ctx = None
+        for extra in tentativas:
+            try:
+                ctx = p.chromium.launch_persistent_context(args.perfil, **opcoes, **extra)
+                break
+            except Exception as e:
+                erro = e
+        if ctx is None:
+            sys.exit(
+                "Não consegui abrir nenhum navegador. Instale o Google Chrome ou o Microsoft Edge,\n"
+                "ou rode: python -m playwright install chromium\n\n"
+                f"Último erro: {str(erro).splitlines()[0]}"
+            )
         ctx.on("response", ao_responder)
         page = ctx.pages[0] if ctx.pages else ctx.new_page()
         page.goto(args.url, wait_until="domcontentloaded")

@@ -6,12 +6,15 @@ Script que extrai o extrato de pontos do **Azul Fidelidade** e salva em CSV e Ex
 
 ```bash
 python -m pip install -r requirements.txt
-python -m playwright install chromium
 ```
+
+O script usa o **Google Chrome** ou o **Microsoft Edge** que já estão no computador (o Edge vem
+com o Windows), então não precisa baixar navegador. Só se nenhum dos dois existir rode
+`python -m playwright install chromium`. Para forçar um deles: `--navegador msedge` ou `--navegador chrome`.
 
 > **Windows:** use `python -m playwright ...` (e não só `playwright ...`). O comando solto
 > só funciona se a pasta `Scripts` do Python estiver no PATH. Se `python` não for reconhecido,
-> troque por `py` (ex.: `py -m playwright install chromium`).
+> troque por `py` (ex.: `py azul_extrato.py`).
 
 ## Uso
 
